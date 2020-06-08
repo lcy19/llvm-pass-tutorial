@@ -1,1 +1,7 @@
-# ollvm/armariris/hikari port to llvm10 in 2020
+# LLVM pass 分享
+
+本项目的目的在于收集并分享pass的学习。基于前人做的工作，项目中添加了project，并做了相应的pass处理，新人的话，可以先从project项目进行学习。
+
+
+
+project的目录结构是为了方便树外编译，不熟悉pass编译的可以先阅读内部关于编译的介绍文章。
