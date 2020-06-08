@@ -1,99 +1,3 @@
-//===- BogusControlFlow.cpp - BogusControlFlow Obfuscation pass ----------===//
-//
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
-//
-//===---------------------------------------------------------------------===//
-//
-// This file implements BogusControlFlow's pass, inserting bogus control flow.
-// It adds bogus flow to a given basic block this way:
-//
-// Before :
-//                    entry
-//                      |
-//                ______v______
-//               |   Original  |
-//               |_____________|
-//                      |
-//                      v
-//                   return
-//
-// After :
-//                    entry
-//                      |
-//                  ____v_____
-//                 |condition*| (false)
-//                 |__________|----+
-//                    (true)|          |
-//                          |          |
-//                    ______v______    |
-//               +-->|   Original* |   |
-//               |   |_____________| (true)
-//               |   (false)|    !-----------> return
-//               |    ______v______    |
-//               |   |   Altered   |<--!
-//               |   |_____________|
-//               |__________|
-//
-//  * The results of these terminator's branch's conditions are always true, but
-//  these predicates are
-//    opacificated. For this, we declare two global values: x and y, and replace
-//    the FCMP_TRUE predicate with (y < 10 || x * (x + 1) % 2 == 0) (this could
-//    be improved, as the global values give a hint on where are the opaque
-//    predicates)
-//
-//  The altered bloc is a copy of the original's one with junk instructions
-//  added accordingly to the type of instructions we found in the bloc
-//
-//  Each basic block of the function is choosen if a random number in the range
-//  [0,100] is smaller than the choosen probability rate. The default value
-//  is 30. This value can be modify using the option -boguscf-prob=[value].
-//  Value must be an integer in the range [0, 100], otherwise the default value
-//  is taken. Exemple: -bcf -bcf_prob=60
-//
-//  The pass can also be loop many times on a function, including on the basic
-//  blocks added in a previous loop. Be careful if you use a big probability
-//  number and choose to run the loop many times wich may cause the pass to run
-//  for a very long time. The default value is one loop, but you can change it
-//  with -boguscf-loop=[value]. Value must be an integer greater than 1,
-//  otherwise the default value is taken. Exemple: -bcf -bcf_loop=2
-//
-//
-//  Defined debug types:
-//  - "gen" : general informations
-//  - "opt" : concerning the given options (parameter)
-//  - "cfg" : printing the various function's cfg before transformation
-//        and after transformation if it has been modified, and all
-//        the functions at end of the pass, after doFinalization.
-//
-//  To use them all, simply use the -debug option.
-//  To use only one of them, follow the pass' command by -debug-only=name.
-//  Exemple, -bcf -debug-only=cfg
-//
-//
-//  Stats:
-//  The following statistics will be printed if you use
-//  the -stats command:
-//
-// a. Number of functions in this module
-// b. Number of times we run on each function
-// c. Initial number of basic blocks in this module
-// d. Number of modified basic blocks
-// e. Number of added basic blocks in this module
-// f. Final number of basic blocks in this module
-//
-// file   : lib/Transforms/Obfuscation/BogusControlFlow.cpp
-// date   : june 2012
-// version: 1.0
-// author : julie.michielin@gmail.com
-// modifications: pjunod, Rinaldini Julien
-// project: Obfuscator
-// option : -bcf
-//
-//===---------------------------------------------------------------------===//
-
 #include "BogusControlFlow.h"
 #include "Utils.h"
 
@@ -139,235 +43,167 @@ struct BogusControlFlow : public FunctionPass {
 
   /* runOnFunction
    *
-   * Overwrite FunctionPass method to apply the transformation
-   * to the function. See header for more details.
+   * 重写FunctionPass方法
+   * 每个basic block被混淆的几率
+   * 它们的默认值分别为1和70%
+   * 可通过设置参数boguscf-loop、 boguscf-prob修改它们的默认值
+   * 入口函数
    */
   virtual bool runOnFunction(Function &F) {
-    // Check if the percentage is correct
+    // 检查混效率是否合法
     if (ObfTimes <= 0) {
       errs() << "BogusControlFlow application number -bcf_loop=x must be x > 0";
       return false;
     }
 
-    // Check if the number of applications is correct
+    // 检查应用个数是否合法
     if (!((ObfProbRate > 0) && (ObfProbRate <= 100))) {
       errs() << "BogusControlFlow application basic blocks percentage "
                 "-bcf_prob=x must be 0 < x <= 100";
       return false;
     }
-    // If fla annotations
+    // 混淆函数
     bogus(F);
+    // 
     doF(*F.getParent());
     return true;
-  } // end of runOnFunction()
+  }
 
   void bogus(Function &F) {
-    // For statistics and debug
+    // 用于统计和调试
     ++NumFunction;
     int NumBasicBlocks = 0;
-    bool firstTime = true; // First time we do the loop in this function
-    bool hasBeenModified = false;
-    DEBUG_WITH_TYPE("opt", errs() << "bcf: Started on function " << F.getName()
-                                  << "\n");
-    DEBUG_WITH_TYPE("opt",
-                    errs() << "bcf: Probability rate: " << ObfProbRate << "\n");
+    bool firstTime = true; // 标记是否是第一次运行该程序
+    bool hasBeenModified = false; //标记是否已经被修改过
+    // 如果混淆率不合法
     if (ObfProbRate < 0 || ObfProbRate > 100) {
-      DEBUG_WITH_TYPE("opt", errs()
-                                 << "bcf: Incorrect value,"
-                                 << " probability rate set to default value: "
-                                 << defaultObfRate << " \n");
       ObfProbRate = defaultObfRate;
     }
-    DEBUG_WITH_TYPE("opt", errs()
-                               << "bcf: How many times: " << ObfTimes << "\n");
+    // 如果混淆次数不合法
     if (ObfTimes <= 0) {
-      DEBUG_WITH_TYPE("opt", errs()
-                                 << "bcf: Incorrect value,"
-                                 << " must be greater than 1. Set to default: "
-                                 << defaultObfTime << " \n");
       ObfTimes = defaultObfTime;
     }
     NumTimesOnFunctions = ObfTimes;
     int NumObfTimes = ObfTimes;
 
-    // Real begining of the pass
-    // Loop for the number of time we run the pass on the function
+    // pass 的开始
+    // 获取混淆的次数来控制循环
     do {
-      DEBUG_WITH_TYPE("cfg", errs() << "bcf: Function " << F.getName()
-                                    << ", before the pass:\n");
-      DEBUG_WITH_TYPE("cfg", F.viewCFG());
-      // Put all the function's block in a list
+      // 将所有的代码块放入到list中
       std::list<BasicBlock *> basicBlocks;
       for (Function::iterator i = F.begin(); i != F.end(); ++i) {
         basicBlocks.push_back(&*i);
       }
-      DEBUG_WITH_TYPE(
-          "gen", errs() << "bcf: Iterating on the Function's Basic Blocks\n");
-
+      // 当基本块列表非空时
       while (!basicBlocks.empty()) {
         NumBasicBlocks++;
-        // Basic Blocks' selection
+        // 选择基本块
+        // 随机生成一个100以内的整数作为混淆率
         if ((int)llvm::cryptoutils->get_range(100) <= ObfProbRate) {
-          DEBUG_WITH_TYPE("opt", errs() << "bcf: Block " << NumBasicBlocks
-                                        << " selected. \n");
           hasBeenModified = true;
           ++NumModifiedBasicBlocks;
           NumAddedBasicBlocks += 3;
           FinalNumBasicBlocks += 3;
-          // Add bogus flow to the given Basic Block (see description)
+          // 循环调用addBogusFlow对选中的basicblock进行增加虚假控制流
           BasicBlock *basicBlock = basicBlocks.front();
           addBogusFlow(basicBlock, F);
         } else {
           DEBUG_WITH_TYPE("opt", errs() << "bcf: Block " << NumBasicBlocks
                                         << " not selected.\n");
         }
-        // remove the block from the list
+        // 每次处理完一个代码块后list弹出
         basicBlocks.pop_front();
 
-        if (firstTime) { // first time we iterate on this function
+        if (firstTime) { 
+        // 第一次运行循环时初始化
           ++InitNumBasicBlocks;
           ++FinalNumBasicBlocks;
         }
-      } // end of while(!basicBlocks.empty())
-      DEBUG_WITH_TYPE("gen",
-                      errs() << "bcf: End of function " << F.getName() << "\n");
-      if (hasBeenModified) { // if the function has been modified
-        DEBUG_WITH_TYPE("cfg", errs() << "bcf: Function " << F.getName()
-                                      << ", after the pass: \n");
-        DEBUG_WITH_TYPE("cfg", F.viewCFG());
-      } else {
-        DEBUG_WITH_TYPE("cfg", errs()
-                                   << "bcf: Function's not been modified \n");
       }
+      // 改变flag
       firstTime = false;
     } while (--NumObfTimes > 0);
   }
 
   /* addBogusFlow
-   *
-   * Add bogus flow to a given basic block, according to the header's
-   * description
+   * 对于给定的代码块 添加虚假控制流
    */
   virtual void addBogusFlow(BasicBlock *basicBlock, Function &F) {
-
-    // Split the block: first part with only the phi nodes and debug info and
-    // terminator
-    //                  created by splitBasicBlock. (-> No instruction)
-    //                  Second part with every instructions from the original
-    //                  block
-    // We do this way, so we don't have to adjust all the phi nodes, metadatas
-    // and so on for the first block. We have to let the phi nodes in the first
-    // part, because they actually are updated in the second part according to
-    // them.
+    // 获取本basicblock中第一个不是Phi、debug、terminator的指令的地址
     BasicBlock::iterator i1 = basicBlock->begin();
     if (basicBlock->getFirstNonPHIOrDbgOrLifetime())
       i1 = (BasicBlock::iterator)basicBlock->getFirstNonPHIOrDbgOrLifetime();
     Twine *var;
     var = new Twine("originalBB");
+    // 然后调用splitBasicBlock函数。该函数根据上述指令的地址将一个basicblock进行拆分
     BasicBlock *originalBB = basicBlock->splitBasicBlock(i1, *var);
-    DEBUG_WITH_TYPE("gen", errs()
-                               << "bcf: First and original basic blocks: ok\n");
-
-    // Creating the altered basic block on which the first basicBlock will jump
+    //对original basicblock进行拷贝生成一个名为altered basicblock的basicblock
+    // 并对该basicblock加入一些垃圾指令
     Twine *var3 = new Twine("alteredBB");
     BasicBlock *alteredBB = createAlteredBasicBlock(originalBB, *var3, &F);
-    DEBUG_WITH_TYPE("gen", errs() << "bcf: Altered basic block: ok\n");
-
-    // Now that all the blocks are created,
-    // we modify the terminators to adjust the control flow.
-
+    // 至此所有的代码块都创建完毕，下面添加控制流
+    // 清除first basicblock和altered basicblock跟父节点的关系，修改终结器以调整控制流程
     alteredBB->getTerminator()->eraseFromParent();
     basicBlock->getTerminator()->eraseFromParent();
-    DEBUG_WITH_TYPE("gen", errs() << "bcf: Terminator removed from the altered"
-                                  << " and first basic blocks\n");
 
-    // Preparing a condition..
-    // For now, the condition is an always true comparaison between 2 float
-    // This will be complicated after the pass (in doFinalization())
+    // 准备一条 1.0==1.0的恒真语句
     Value *LHS = ConstantFP::get(Type::getFloatTy(F.getContext()), 1.0);
     Value *RHS = ConstantFP::get(Type::getFloatTy(F.getContext()), 1.0);
-    DEBUG_WITH_TYPE("gen", errs() << "bcf: Value LHS and RHS created\n");
 
-    // The always true condition. End of the first block
     Twine *var4 = new Twine("condition");
     FCmpInst *condition =
         new FCmpInst(*basicBlock, FCmpInst::FCMP_TRUE, LHS, RHS, *var4);
-    DEBUG_WITH_TYPE("gen", errs() << "bcf: Always true condition created\n");
 
-    // Jump to the original basic block if the condition is true or
-    // to the altered block if false.
     BranchInst::Create(originalBB, alteredBB, (Value *)condition, basicBlock);
-    DEBUG_WITH_TYPE(
-        "gen",
-        errs() << "bcf: Terminator instruction in first basic block: ok\n");
 
-    // The altered block loop back on the original one.
+    // 在altered模块的尾部增加一条跳转指令，当它执行完毕之后跳转到original basicblock模块(实际上它并不会执行)
     BranchInst::Create(originalBB, alteredBB);
-    DEBUG_WITH_TYPE(
-        "gen", errs() << "bcf: Terminator instruction in altered block: ok\n");
 
-    // The end of the originalBB is modified to give the impression that
-    // sometimes it continues in the loop, and sometimes it return the desired
-    // value (of course it's always true, so it always use the original
-    // terminator..
-    //  but this will be obfuscated too;) )
-
-    // iterate on instruction just before the terminator of the originalBB
+    // 迭代器定位到最后一个originalBasicBlock
     BasicBlock::iterator i = originalBB->end();
 
     // Split at this point (we only want the terminator in the second part)
     Twine *var5 = new Twine("originalBBpart2");
+    // 分割成两块
     BasicBlock *originalBBpart2 = originalBB->splitBasicBlock(--i, *var5);
-    DEBUG_WITH_TYPE("gen",
-                    errs() << "bcf: Terminator part of the original basic block"
-                           << " is isolated\n");
-    // the first part go either on the return statement or on the begining
-    // of the altered block.. So we erase the terminator created when splitting.
+    // 首先清除first basicblock和altered basicblock跟父节点的关系
     originalBB->getTerminator()->eraseFromParent();
     // We add at the end a new always true condition
     Twine *var6 = new Twine("condition2");
+    // 将basicblock与alterbasicblock加到判断语句 1.0==1.0 的两侧
     FCmpInst *condition2 =
         new FCmpInst(*originalBB, CmpInst::FCMP_TRUE, LHS, RHS, *var6);
     BranchInst::Create(originalBBpart2, alteredBB, (Value *)condition2,
                        originalBB);
-    DEBUG_WITH_TYPE("gen", errs()
-                               << "bcf: Terminator original basic block: ok\n");
-    DEBUG_WITH_TYPE("gen", errs() << "bcf: End of addBogusFlow().\n");
-
   } // end of addBogusFlow()
 
   /* createAlteredBasicBlock
-   *
-   * This function return a basic block similar to a given one.
-   * It's inserted just after the given basic block.
-   * The instructions are similar but junk instructions are added between
-   * the cloned one. The cloned instructions' phi nodes, metadatas, uses and
-   * debug locations are adjusted to fit in the cloned basic block and
-   * behave nicely.
+   * 创建虚假指令块的核心方法
+   * 此函数返回与给定块相似的基本块
+   * 它被插入到给定的基本块之后指令相似
+   * 但在之间添加了垃圾指令
+   * 克隆指令的phi节点，元数据，用法和
+   * 调试位置已调整为适合克隆的基本块
    */
   virtual BasicBlock *createAlteredBasicBlock(BasicBlock *basicBlock,
                                               const Twine &Name = "gen",
                                               Function *F = 0) {
-    // Useful to remap the informations concerning instructions.
+    // 重映射操作数
     ValueToValueMapTy VMap;
     BasicBlock *alteredBB = llvm::CloneBasicBlock(basicBlock, VMap, Name, F);
-    DEBUG_WITH_TYPE("gen", errs() << "bcf: Original basic block cloned\n");
-    // Remap operands.
     BasicBlock::iterator ji = basicBlock->begin();
     for (BasicBlock::iterator i = alteredBB->begin(), e = alteredBB->end();
          i != e; ++i) {
-      // Loop over the operands of the instruction
+      // 循环执行指令的操作数
       for (User::op_iterator opi = i->op_begin(), ope = i->op_end(); opi != ope;
            ++opi) {
-        // get the value for the operand
+        // 获取操作数的值
+        // 该方法返回函数局部值（Argument，Instruction，BasicBlock）的映射值，或计算并存储常数的值
         Value *v = MapValue(*opi, VMap, RF_None, 0);
         if (v != 0) {
           *opi = v;
-          DEBUG_WITH_TYPE("gen",
-                          errs() << "bcf: Value's operand has been setted\n");
         }
       }
-      DEBUG_WITH_TYPE("gen", errs() << "bcf: Operands remapped\n");
       // Remap phi nodes' incoming blocks.
       if (PHINode *pn = dyn_cast<PHINode>(i)) {
         for (unsigned j = 0, e = pn->getNumIncomingValues(); j != e; ++j) {
@@ -377,37 +213,23 @@ struct BogusControlFlow : public FunctionPass {
           }
         }
       }
-      DEBUG_WITH_TYPE("gen", errs() << "bcf: PHINodes remapped\n");
       // Remap attached metadata.
       SmallVector<std::pair<unsigned, MDNode *>, 4> MDs;
       i->getAllMetadata(MDs);
-      DEBUG_WITH_TYPE("gen", errs() << "bcf: Metadatas remapped\n");
       // important for compiling with DWARF, using option -g.
       i->setDebugLoc(ji->getDebugLoc());
       ji++;
-      DEBUG_WITH_TYPE("gen", errs()
-                                 << "bcf: Debug information location setted\n");
-
     } // The instructions' informations are now all correct
-
-    DEBUG_WITH_TYPE("gen",
-                    errs() << "bcf: The cloned basic block is now correct\n");
-    DEBUG_WITH_TYPE(
-        "gen",
-        errs() << "bcf: Starting to add junk code in the cloned bloc...\n");
-
-    // add random instruction in the middle of the bloc. This part can be
-    // improve
+    // 在块的中间添加随机指令
     for (BasicBlock::iterator i = alteredBB->begin(), e = alteredBB->end();
          i != e; ++i) {
-      // in the case we find binary operator, we modify slightly this part by
-      // randomly insert some instructions
+      // 在找到二进制运算符的情况下，我们通过随机插入一些指令来对此部分进行稍微修改
       if (i->isBinaryOp()) { // binary instructions
         unsigned opcode = i->getOpcode();
         BinaryOperator *op, *op1 = NULL;
         Twine *var = new Twine("_");
-        // treat differently float or int
-        // Binary int
+        // 注意区别int float
+        // 当操作是整形运算时
         if (opcode == Instruction::Add || opcode == Instruction::Sub ||
             opcode == Instruction::Mul || opcode == Instruction::UDiv ||
             opcode == Instruction::SDiv || opcode == Instruction::URem ||
@@ -438,7 +260,7 @@ struct BogusControlFlow : public FunctionPass {
             }
           }
         }
-        // Binary float
+        // 当操作是浮点型运算时
         if (opcode == Instruction::FAdd || opcode == Instruction::FSub ||
             opcode == Instruction::FMul || opcode == Instruction::FDiv ||
             opcode == Instruction::FRem) {
@@ -461,6 +283,7 @@ struct BogusControlFlow : public FunctionPass {
             }
           }
         }
+        // 当操作是整形比较时
         if (opcode == Instruction::ICmp) { // Condition (with int)
           ICmpInst *currentI = (ICmpInst *)(&i);
           switch (llvm::cryptoutils->get_range(3)) { // must be improved
@@ -505,6 +328,7 @@ struct BogusControlFlow : public FunctionPass {
             break;
           }
         }
+        // 当操作是浮点型比较时
         if (opcode == Instruction::FCmp) { // Conditions (with float)
           FCmpInst *currentI = (FCmpInst *)(&i);
           switch (llvm::cryptoutils->get_range(3)) { // must be improved
@@ -554,25 +378,122 @@ struct BogusControlFlow : public FunctionPass {
     return alteredBB;
   } // end of createAlteredBasicBlock()
 
+  /*
+  * 替换恒真谓词函数
+  * 产生随机化的恒真谓词
+  */
+  void replaceTrueOp (Module &M,std::vector<Instruction *> toEdit,GlobalVariable *x,GlobalVariable *y){
+  	BinaryOperator *op, *op1 = NULL;
+    LoadInst *opX, *opY;
+    ICmpInst *condition, *condition2;
+    int random = 0;
+    // 编列需要替换的位置
+  	for (std::vector<Instruction *>::iterator i = toEdit.begin();
+         i != toEdit.end(); ++i) {
+      // 获取两个操作变量 X Y
+      opX = new LoadInst((Value *)x, "", (*i));
+      opY = new LoadInst((Value *)y, "", (*i));
+      // 获取一个随机数
+      random = (int)llvm::cryptoutils->get_range(125);
+      // 通过随机数的不同取值进行不同的混淆
+      if (random % 4 == 0){
+        op = BinaryOperator::Create(
+          Instruction::Add, (Value *)opX,
+          ConstantInt::get(Type::getInt32Ty(M.getContext()), 1, false), "",
+          (*i));
+      op1 =
+          BinaryOperator::Create(Instruction::Mul, (Value *)opX, op, "", (*i));
+      op = BinaryOperator::Create(
+          Instruction::URem, op1,
+          ConstantInt::get(Type::getInt32Ty(M.getContext()), 2, false), "",
+          (*i));
+      condition = new ICmpInst(
+          (*i), ICmpInst::ICMP_EQ, op,
+          ConstantInt::get(Type::getInt32Ty(M.getContext()), 0, false));
+      condition2 = new ICmpInst(
+          (*i), ICmpInst::ICMP_SLT, opY,
+          ConstantInt::get(Type::getInt32Ty(M.getContext()), (int)llvm::cryptoutils->get_range(125)+1, false));
+      op1 = BinaryOperator::Create(Instruction::Or, (Value *)condition,
+                                   (Value *)condition2, "", (*i));
+      }
+      else if (random % 4 == 1){
+        op = BinaryOperator::Create(
+          Instruction::Add, (Value *)opX,
+          ConstantInt::get(Type::getInt32Ty(M.getContext()), 3, false), "",
+          (*i));
+      op1 =
+          BinaryOperator::Create(Instruction::Mul,op, (Value *)opX, "", (*i));
+      op = BinaryOperator::Create(
+          Instruction::URem, op1,
+          ConstantInt::get(Type::getInt32Ty(M.getContext()), 2, false), "",
+          (*i));
+      condition = new ICmpInst(
+          (*i), ICmpInst::ICMP_EQ, op,
+          ConstantInt::get(Type::getInt32Ty(M.getContext()), 0, false));
+      condition2 = new ICmpInst(
+          (*i), ICmpInst::ICMP_SLT, opY,
+          ConstantInt::get(Type::getInt32Ty(M.getContext()), (int)llvm::cryptoutils->get_range(125)+1, false));
+      op1 = BinaryOperator::Create(Instruction::Or, (Value *)condition2,
+                                   (Value *)condition, "", (*i));
+      }
+      else if (random % 4 == 2) {
+        op = BinaryOperator::Create(
+          Instruction::Add, (Value *)opX,
+          ConstantInt::get(Type::getInt32Ty(M.getContext()), 5, false), "",
+          (*i));
+      op1 =
+          BinaryOperator::Create(Instruction::Mul, op, (Value *)opX,"", (*i));
+      op = BinaryOperator::Create(
+          Instruction::URem, op1,
+          ConstantInt::get(Type::getInt32Ty(M.getContext()), 2, false), "",
+          (*i));
+      condition = new ICmpInst(
+          (*i), ICmpInst::ICMP_EQ, op,
+          ConstantInt::get(Type::getInt32Ty(M.getContext()), 0, false));
+      condition2 = new ICmpInst(
+          (*i), ICmpInst::ICMP_SLT, opY,
+          ConstantInt::get(Type::getInt32Ty(M.getContext()), (int)llvm::cryptoutils->get_range(125)+1, false));
+      op1 = BinaryOperator::Create(Instruction::Or, (Value *)condition2,
+                                   (Value *)condition, "", (*i));
+      }
+      else {
+        op = BinaryOperator::Create(
+          Instruction::Add, (Value *)opX,
+          ConstantInt::get(Type::getInt32Ty(M.getContext()), 7, false), "",
+          (*i));
+      op1 =
+          BinaryOperator::Create(Instruction::Mul, op, (Value *)opX,"", (*i));
+      op = BinaryOperator::Create(
+          Instruction::URem, op1,
+          ConstantInt::get(Type::getInt32Ty(M.getContext()), 2, false), "",
+          (*i));
+      condition = new ICmpInst(
+          (*i), ICmpInst::ICMP_EQ, op,
+          ConstantInt::get(Type::getInt32Ty(M.getContext()), 0, false));
+      condition2 = new ICmpInst(
+          (*i), ICmpInst::ICMP_SLT, opY,
+          ConstantInt::get(Type::getInt32Ty(M.getContext()), (int)llvm::cryptoutils->get_range(125)+1, false));
+      op1 = BinaryOperator::Create(Instruction::Or, (Value *)condition2,
+                                   (Value *)condition, "", (*i));
+      }
+      BranchInst::Create(((BranchInst *)*i)->getSuccessor(0),
+                         ((BranchInst *)*i)->getSuccessor(1), (Value *)op1,
+                         ((BranchInst *)*i)->getParent());
+      (*i)->eraseFromParent(); // erase the branch
+    }
+    return;
+  	
+  }
+
   /* doFinalization
    *
-   * Overwrite FunctionPass method to apply the transformations to the whole
-   * module. This part obfuscate all the always true predicates of the module.
-   * More precisely, the condition which predicate is FCMP_TRUE.
-   * It also remove all the functions' basic blocks' and instructions' names.
+   * 混淆所有恒真谓词
    */
   bool doF(Module &M) {
-    // In this part we extract all always-true predicate and replace them with
-    // opaque predicate: For this, we declare two global values: x and y, and
-    // replace the FCMP_TRUE predicate with (y < 10 || x * (x + 1) % 2 == 0) A
-    // better way to obfuscate the predicates would be welcome. In the meantime
-    // we will erase the name of the basic blocks, the instructions and the
-    // functions.
-    DEBUG_WITH_TYPE("gen", errs() << "bcf: Starting doFinalization...\n");
-
-    //  The global values
+    // 创建两个全局变量 x y
     Twine *varX = new Twine("x");
     Twine *varY = new Twine("y");
+    // 将 x y初始化为0
     Value *x1 = ConstantInt::get(Type::getInt32Ty(M.getContext()), 0, false);
     Value *y1 = ConstantInt::get(Type::getInt32Ty(M.getContext()), 0, false);
 
@@ -587,7 +508,7 @@ struct BogusControlFlow : public FunctionPass {
     BinaryOperator *op, *op1 = NULL;
     LoadInst *opX, *opY;
     ICmpInst *condition, *condition2;
-    // Looking for the conditions and branches to transform
+    // 寻找需要替换的恒真谓词
     for (Module::iterator mi = M.begin(), me = M.end(); mi != me; ++mi) {
       for (Function::iterator fi = mi->begin(), fe = mi->end(); fi != fe;
            ++fi) {
@@ -600,75 +521,31 @@ struct BogusControlFlow : public FunctionPass {
             unsigned opcode = cond->getOpcode();
             if (opcode == Instruction::FCmp) {
               if (cond->getPredicate() == FCmpInst::FCMP_TRUE) {
-                DEBUG_WITH_TYPE("gen",
-                                errs() << "bcf: an always true predicate !\n");
-                toDelete.push_back(cond); // The condition
-                toEdit.push_back(tbb);    // The branch using the condition
+                // 标记需要替换的代码位置
+                toDelete.push_back(cond);
+                toEdit.push_back(tbb);
               }
             }
           }
         }
-        /*
-        for (BasicBlock::iterator bi = fi->begin(), be = fi->end() ; bi != be;
-        ++bi){ bi->setName(""); // setting the basic blocks' names
-        }
-        */
       }
     }
-    // Replacing all the branches we found
-    for (std::vector<Instruction *>::iterator i = toEdit.begin();
-         i != toEdit.end(); ++i) {
-      // if y < 10 || x*(x+1) % 2 == 0
-      opX = new LoadInst((Value *)x, "", (*i));
-      opY = new LoadInst((Value *)y, "", (*i));
-
-      op = BinaryOperator::Create(
-          Instruction::Sub, (Value *)opX,
-          ConstantInt::get(Type::getInt32Ty(M.getContext()), 1, false), "",
-          (*i));
-      op1 =
-          BinaryOperator::Create(Instruction::Mul, (Value *)opX, op, "", (*i));
-      op = BinaryOperator::Create(
-          Instruction::URem, op1,
-          ConstantInt::get(Type::getInt32Ty(M.getContext()), 2, false), "",
-          (*i));
-      condition = new ICmpInst(
-          (*i), ICmpInst::ICMP_EQ, op,
-          ConstantInt::get(Type::getInt32Ty(M.getContext()), 0, false));
-      condition2 = new ICmpInst(
-          (*i), ICmpInst::ICMP_SLT, opY,
-          ConstantInt::get(Type::getInt32Ty(M.getContext()), 10, false));
-      op1 = BinaryOperator::Create(Instruction::Or, (Value *)condition,
-                                   (Value *)condition2, "", (*i));
-
-      BranchInst::Create(((BranchInst *)*i)->getSuccessor(0),
-                         ((BranchInst *)*i)->getSuccessor(1), (Value *)op1,
-                         ((BranchInst *)*i)->getParent());
-      DEBUG_WITH_TYPE("gen", errs() << "bcf: Erase branch instruction:"
-                                    << *((BranchInst *)*i) << "\n");
-      (*i)->eraseFromParent(); // erase the branch
-    }
-    // Erase all the associated conditions we found
+    // 对指令进行替换
+    replaceTrueOp(M,toEdit,x,y);
+    // 删除原指令
     for (std::vector<Instruction *>::iterator i = toDelete.begin();
          i != toDelete.end(); ++i) {
-      DEBUG_WITH_TYPE("gen", errs() << "bcf: Erase condition instruction:"
-                                    << *((Instruction *)*i) << "\n");
       (*i)->eraseFromParent();
     }
-
-    // Only for debug
-    DEBUG_WITH_TYPE("cfg", errs() << "bcf: End of the pass, here are the "
-                                     "graphs after doFinalization\n");
     for (Module::iterator mi = M.begin(), me = M.end(); mi != me; ++mi) {
       DEBUG_WITH_TYPE("cfg", errs()
                                  << "bcf: Function " << mi->getName() << "\n");
       DEBUG_WITH_TYPE("cfg", mi->viewCFG());
     }
-
     return true;
-  } // end of doFinalization
-};  // end of struct BogusControlFlow : public FunctionPass
-} // namespace
+  }
+};
+}
 
 char BogusControlFlow::ID = 0;
 static RegisterPass<BogusControlFlow> X("boguscf",
